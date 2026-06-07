@@ -194,6 +194,20 @@ def save_state(state):
     except Exception as e:
         log.error(f"[STATE] Erreur sauvegarde: {e}")
 
+# ── Initialisation de l'état global ──────────────────────────────────────────
+app_state = load_state()
+
+# ── Token API local ────────────────────────────────────────────────────────────
+import secrets as _secrets
+import hashlib as _hashlib
+
+LOCAL_API_TOKEN = os.getenv("EMAILAI_API_TOKEN", "")
+if not LOCAL_API_TOKEN:
+    LOCAL_API_TOKEN = _secrets.token_urlsafe(32)
+    log.warning(f"[AUTH] Token API généré: {LOCAL_API_TOKEN[:12]}... — ajoute EMAILAI_API_TOKEN dans Render")
+
+CRON_SECRET = os.getenv("EMAILAI_CRON_SECRET", "")
+
 def get_banned_words() -> list:
     return app_state.get("banned_words", DEFAULT_BANNED_WORDS)
 
@@ -360,7 +374,6 @@ def _verify_local_token(request):
 # Endpoints publics (pas de token requis)
 PUBLIC_ENDPOINTS = {"/auth/status", "/auth/login", "/", "/docs", "/openapi.json", "/cron/run"}
 
-app = FastAPI(title="EmailAI v5")
 app = FastAPI(title="EmailAI v5")
 app.add_middleware(CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:3000"],
@@ -2316,8 +2329,7 @@ def import_backup(req: ImportRequest):
 # Compatible: local (thread) + GitHub Actions (endpoint HTTP)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Clé secrète pour protéger l'endpoint cron quand déployé
-CRON_SECRET = os.getenv("EMAILAI_CRON_SECRET", "")
+# CRON_SECRET défini plus haut dans les globals
 
 def _run_full_cycle(max_emails: int = 20, source: str = "local") -> dict:
     """
