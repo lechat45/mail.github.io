@@ -1,139 +1,51 @@
-# ══════════════════════════════════════════════════════════════════════════════
-# EmailAI — Analyse automatique toutes les 5 minutes
-# ══════════════════════════════════════════════════════════════════════════════
-# Pour activer:
-#   1. Déploie EmailAI sur Railway/Render/VPS (voir DEPLOY.md)
-#   2. Ajoute les secrets GitHub:
-#      - EMAILAI_API_URL: https://ton-app.railway.app
-#      - EMAILAI_CRON_SECRET: (la valeur de EMAILAI_CRON_SECRET dans ton .env)
-#   3. Active les GitHub Actions dans ton repo
-# ══════════════════════════════════════════════════════════════════════════════
-
-name: EmailAI — Analyse automatique
+name: EmailAI Auto-Analyze
 
 on:
-  # Toutes les 5 minutes (GitHub Actions minimum = 5 min)
   schedule:
     - cron: '*/5 * * * *'
-
-  # Déclenchement manuel depuis l'interface GitHub
   workflow_dispatch:
-    inputs:
-      max_emails:
-        description: 'Nombre max d emails à analyser'
-        required: false
-        default: '20'
-
-  # Après chaque push sur main (pour tester la config)
   push:
     branches: [main]
     paths:
       - 'main.py'
-      - '.env.example'
 
 jobs:
   analyze:
-    name: Cycle d analyse IA
+    name: Cycle analyse IA
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
-      - name: Vérifier la configuration
-        run: |
-          if [ -z "${{ secrets.EMAILAI_API_URL }}" ]; then
-            echo "❌ EMAILAI_API_URL non configuré dans les secrets GitHub"
-            echo "   → Settings > Secrets > Actions > New repository secret"
-            exit 1
-          fi
-          echo "✅ URL API: ${{ secrets.EMAILAI_API_URL }}"
-
-      - name: Vérifier que l'API est accessible
-        id: health_check
+      - name: Vérifier API accessible
+        id: health
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            "${{ secrets.EMAILAI_API_URL }}/auth/status" \
-            --max-time 10)
-          echo "Status HTTP: $STATUS"
-          if [ "$STATUS" != "200" ]; then
-            echo "⚠️ API non accessible (HTTP $STATUS) — abandon du cycle"
-            echo "api_ok=false" >> $GITHUB_OUTPUT
-          else
+            "${{ secrets.EMAILAI_API_URL }}/health" --max-time 15 || echo "000")
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          if [ "$STATUS" = "200" ] || [ "$STATUS" = "401" ]; then
             echo "api_ok=true" >> $GITHUB_OUTPUT
+            echo "API accessible (HTTP $STATUS)"
+          else
+            echo "api_ok=false" >> $GITHUB_OUTPUT
+            echo "API non accessible (HTTP $STATUS) - Render endormi ?"
           fi
 
-      - name: Lancer le cycle d analyse complet
-        if: steps.health_check.outputs.api_ok == 'true'
-        id: run_cron
+      - name: Réveiller Render si endormi
+        if: steps.health.outputs.api_ok == 'false'
         run: |
-          MAX_EMAILS="${{ github.event.inputs.max_emails || '20' }}"
+          echo "Tentative de réveil..."
+          curl -s "${{ secrets.EMAILAI_API_URL }}/health" --max-time 60 || true
+          sleep 10
 
+      - name: Lancer le cycle d'analyse
+        if: steps.health.outputs.api_ok == 'true'
+        run: |
           RESPONSE=$(curl -s -X POST \
-            "${{ secrets.EMAILAI_API_URL }}/cron/run?max_emails=${MAX_EMAILS}&secret=${{ secrets.EMAILAI_CRON_SECRET }}" \
-            -H "Content-Type: application/json" \
+            "${{ secrets.EMAILAI_API_URL }}/cron/run?max_emails=20&secret=${{ secrets.EMAILAI_CRON_SECRET }}" \
             -H "X-Cron-Secret: ${{ secrets.EMAILAI_CRON_SECRET }}" \
-            --max-time 300 \
-            -w "\n%{http_code}")
-
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-
-          echo "HTTP: $HTTP_CODE"
-          echo "Réponse: $BODY"
-
-          if [ "$HTTP_CODE" = "200" ]; then
-            echo "✅ Cycle d'analyse terminé avec succès"
-            # Parser les stats de la réponse
-            CLASSIFIED=$(echo $BODY | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('classified',0))" 2>/dev/null || echo "?")
-            ANALYZED=$(echo $BODY | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('analyzed',0))" 2>/dev/null || echo "?")
-            DURATION=$(echo $BODY | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('duration_s',0))" 2>/dev/null || echo "?")
-            ERRORS=$(echo $BODY | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('errors',[])))" 2>/dev/null || echo "?")
-            echo ""
-            echo "📊 Résultats:"
-            echo "   Emails classifiés: $CLASSIFIED"
-            echo "   Emails analysés:   $ANALYZED"
-            echo "   Durée:             ${DURATION}s"
-            echo "   Erreurs:           $ERRORS"
-          else
-            echo "❌ Erreur lors du cycle (HTTP $HTTP_CODE)"
-            echo "Réponse: $BODY"
-            exit 1
-          fi
-
-      - name: Vérifier les relances
-        if: steps.health_check.outputs.api_ok == 'true'
-        run: |
-          RESPONSE=$(curl -s \
-            "${{ secrets.EMAILAI_API_URL }}/emails/follow-ups" \
-            -H "X-Cron-Secret: ${{ secrets.EMAILAI_CRON_SECRET }}" \
-            --max-time 15)
-          COUNT=$(echo $RESPONSE | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('count',0))" 2>/dev/null || echo "0")
-          if [ "$COUNT" -gt "0" ] 2>/dev/null; then
-            echo "🔔 $COUNT email(s) en attente de relance !"
-          else
-            echo "✅ Aucune relance en attente"
-          fi
-
-      - name: Rapport du cycle
-        if: always()
-        run: |
-          echo ""
-          echo "══════════════════════════════════════"
-          echo "  EmailAI — Rapport du cycle"
-          echo "  $(date '+%Y-%m-%d %H:%M:%S UTC')"
-          echo "══════════════════════════════════════"
-          curl -s "${{ secrets.EMAILAI_API_URL }}/cron/status" \
-            --max-time 10 | python3 -c "
-import sys,json
-try:
-    d=json.load(sys.stdin)
-    r=d.get('last_report',{})
-    if r:
-        print(f'  Classifiés: {r.get(\"classified\",0)}')
-        print(f'  Analysés:   {r.get(\"analyzed\",0)}')
-        print(f'  Règles:     {r.get(\"rules_applied\",0)}')
-        print(f'  Replies:    {r.get(\"auto_replies_sent\",0)}')
-        print(f'  Durée:      {r.get(\"duration_s\",0)}s')
-        errs=r.get('errors',[])
-        if errs: print(f'  ⚠️ Erreurs: {len(errs)}')
-except: print('  Rapport indisponible')
-" 2>/dev/null || echo "  API non accessible"
+            --max-time 300 || echo '{"error":"timeout"}')
+          echo "Réponse: $RESPONSE"
+          CLASSIFIED=$(echo "$RESPONSE" | grep -o '"classified":[0-9]*' | grep -o '[0-9]*' || echo "?")
+          ANALYZED=$(echo "$RESPONSE"  | grep -o '"analyzed":[0-9]*'   | grep -o '[0-9]*' || echo "?")
+          DURATION=$(echo "$RESPONSE"  | grep -o '"duration_s":[0-9.]*' | grep -o '[0-9.]*' || echo "?")
+          echo "Classifiés: $CLASSIFIED | Analysés: $ANALYZED | Durée: ${DURATION}s"

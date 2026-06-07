@@ -3,7 +3,6 @@ import react from "@vitejs/plugin-react"
 
 export default defineConfig({
   plugins: [react()],
-  // IMPORTANT: remplace "mail.github.io" par le nom exact de ton repo GitHub
   base: "/mail.github.io/",
   build: {
     outDir: "dist"
